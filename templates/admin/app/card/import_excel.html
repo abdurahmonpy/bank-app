@@ -1,0 +1,39 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls static %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+<a href="{% url 'admin:index' %}">{% trans 'Home' %}</a>
+&rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+&rsaquo; <a href="{% url 'admin:app_card_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+&rsaquo; {% trans 'Import Excel' %}
+</div>
+{% endblock %}
+
+{% block content %}
+<div style="max-width: 650px; background: #fff; padding: 25px; border-radius: 8px; border: 1px solid #ddd; margin-top: 15px;">
+    <h2>📥 Kartalarni Excel fayldan import qilish</h2>
+    <p style="color: #666; margin-bottom: 20px;">
+        Excel (.xlsx, .xls) faylini tanlang. Faylda quyidagi ustunlar bo'lishi lozim:
+        <br>
+        <strong>card_number</strong>, <strong>expire</strong>, <strong>phone</strong>, <strong>status</strong>, <strong>balance</strong>.
+    </p>
+
+    <form method="post" enctype="multipart/form-data">
+        {% csrf_token %}
+        <div style="margin-bottom: 20px;">
+            <label for="id_excel_file" style="display: block; font-weight: bold; margin-bottom: 8px;">Excel fayl:</label>
+            <input type="file" name="excel_file" id="id_excel_file" accept=".xlsx, .xls" required style="padding: 8px; border: 1px solid #ccc; border-radius: 4px; width: 100%;">
+        </div>
+
+        <div style="display: flex; gap: 10px;">
+            <button type="submit" class="button" style="background: #28a745; color: white; padding: 10px 20px; font-weight: bold; border: none; border-radius: 4px; cursor: pointer;">
+                Yuklash va Import qilish
+            </button>
+            <a href="{% url 'admin:app_card_changelist' %}" class="button" style="background: #6c757d; color: white; padding: 10px 20px; border-radius: 4px; text-decoration: none;">
+                Bekor qilish
+            </a>
+        </div>
+    </form>
+</div>
+{% endblock %}
