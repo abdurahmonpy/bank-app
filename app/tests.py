@@ -1,11 +1,12 @@
-from decimal import Decimal
+import json
 import io
 import os
+from decimal import Decimal
 import openpyxl
 from django.test import TestCase, Client
 from django.contrib.auth.models import User
 from django.core.management import call_command
-from app.models import Card, CardStatus
+from app.models import Card, CardStatus, Transfer, TransferState, Error
 from app.utils import (
     normalize_card,
     format_card,
@@ -17,6 +18,7 @@ from app.utils import (
     validate_luhn,
     prepare_message,
     send_message,
+    calculate_exchange,
 )
 
 
@@ -44,7 +46,6 @@ class UtilsTestCase(TestCase):
         self.assertEqual(normalize_expiry("12/2024"), "12/24")
 
     def test_luhn_algorithm(self):
-        # Known valid card test
         self.assertTrue(validate_luhn("49927398716"))
         self.assertFalse(validate_luhn("49927398717"))
 
@@ -52,6 +53,11 @@ class UtilsTestCase(TestCase):
         msg = prepare_message("8600123456789012", Decimal("150000.00"), lang="UZ")
         self.assertIn("Sizning kartangiz", msg)
         self.assertIn("150,000.00 UZS", msg)
+
+    def test_calculate_exchange(self):
+        self.assertEqual(calculate_exchange(100, "840"), Decimal("1280000.00"))
+        self.assertEqual(calculate_exchange(100, "643"), Decimal("13500.00"))
+        self.assertEqual(calculate_exchange(50000, "860"), Decimal("50000.00"))
 
 
 class CardModelTestCase(TestCase):
@@ -104,6 +110,11 @@ class ManagementCommandsTestCase(TestCase):
         call_command("send_card_messages", status="active", stdout=out)
         self.assertIn("Finished", out.getvalue())
 
+    def test_populate_command(self):
+        call_command("PopulateCommand")
+        self.assertTrue(Error.objects.filter(code=32700).exists())
+        self.assertTrue(Error.objects.filter(code=32707).exists())
+
 
 class AdminExcelImportTestCase(TestCase):
     def setUp(self):
@@ -112,7 +123,6 @@ class AdminExcelImportTestCase(TestCase):
         self.client.login(username="admin", password="password123")
 
     def test_admin_import_excel(self):
-        # Create in-memory excel file
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.append(["card_number", "expire", "phone", "status", "balance"])
@@ -131,3 +141,109 @@ class AdminExcelImportTestCase(TestCase):
         self.assertEqual(card.expire, "09/26")
         self.assertEqual(card.phone, "+998999730303")
         self.assertEqual(card.balance, Decimal("1500.00"))
+
+
+class TransferRPCTestCase(TestCase):
+    def setUp(self):
+        self.client = Client()
+        call_command("PopulateCommand")
+
+        self.sender = Card.objects.create(
+            card_number="8600123412341234",
+            expire="12/26",
+            phone="+998901234567",
+            status=CardStatus.ACTIVE,
+            balance=Decimal("2000000.00"),
+        )
+        self.receiver = Card.objects.create(
+            card_number="8600567812345678",
+            expire="08/27",
+            phone="+998907654321",
+            status=CardStatus.ACTIVE,
+            balance=Decimal("50000.00"),
+        )
+
+    def _rpc(self, method: str, params: dict, rpc_id: int = 1):
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": rpc_id,
+        }
+        res = self.client.post(
+            "/rpc/",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 200)
+        return res.json()
+
+    def test_transfer_lifecycle(self):
+        ext_id = "tr-test-001"
+        # 1. Create transfer
+        create_res = self._rpc(
+            "transfer.create",
+            {
+                "ext_id": ext_id,
+                "sender_card_number": "8600123412341234",
+                "sender_card_expiry": "12/26",
+                "receiver_card_number": "8600567812345678",
+                "sending_amount": 100000,
+                "currency": "860",
+            },
+        )
+        self.assertIn("result", create_res)
+        self.assertEqual(create_res["result"]["state"], "created")
+        self.assertTrue(create_res["result"]["otp_sent"])
+
+        transfer = Transfer.objects.get(ext_id=ext_id)
+        otp = transfer.otp
+
+        # 2. Check state
+        state_res = self._rpc("transfer.state", {"ext_id": ext_id})
+        self.assertEqual(state_res["result"]["state"], "created")
+
+        # 3. Wrong OTP attempt
+        wrong_res = self._rpc("transfer.confirm", {"ext_id": ext_id, "otp": "000000"})
+        self.assertIn("error", wrong_res)
+        self.assertEqual(wrong_res["error"]["code"], 32712)
+
+        # 4. Correct OTP confirm
+        confirm_res = self._rpc("transfer.confirm", {"ext_id": ext_id, "otp": otp})
+        self.assertIn("result", confirm_res)
+        self.assertEqual(confirm_res["result"]["state"], "confirmed")
+
+        # Verify balances updated atomically
+        self.sender.refresh_from_db()
+        self.receiver.refresh_from_db()
+        self.assertEqual(self.sender.balance, Decimal("1900000.00"))
+        self.assertEqual(self.receiver.balance, Decimal("150000.00"))
+
+        # 5. History check
+        hist_res = self._rpc("transfer.history", {"card_number": "8600123412341234"})
+        self.assertIn("result", hist_res)
+        self.assertEqual(len(hist_res["result"]), 1)
+        self.assertEqual(hist_res["result"][0]["ext_id"], ext_id)
+
+    def test_transfer_cancel(self):
+        ext_id = "tr-cancel-002"
+        self._rpc(
+            "transfer.create",
+            {
+                "ext_id": ext_id,
+                "sender_card_number": "8600123412341234",
+                "sender_card_expiry": "12/26",
+                "receiver_card_number": "8600567812345678",
+                "sending_amount": 50000,
+                "currency": "860",
+            },
+        )
+        cancel_res = self._rpc("transfer.cancel", {"ext_id": ext_id})
+        self.assertIn("result", cancel_res)
+        self.assertEqual(cancel_res["result"]["state"], "cancelled")
+
+    def test_card_info(self):
+        info_res = self._rpc("card.info", {"card_number": "8600 1234 1234 1234", "expiry": "12/26"})
+        self.assertIn("result", info_res)
+        self.assertEqual(info_res["result"]["card_status"], "active")
+        self.assertEqual(info_res["result"]["balance"], 2000000.0)

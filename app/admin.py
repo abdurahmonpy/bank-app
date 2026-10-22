@@ -2,11 +2,10 @@ from django.contrib import admin, messages
 from django.urls import path
 from django.shortcuts import render, redirect
 from django.utils.html import format_html
-from django.core.exceptions import ValidationError
 from decimal import Decimal
 import openpyxl
 
-from app.models import Card, CardStatus
+from app.models import Card, CardStatus, Transfer, Error
 from app.utils import (
     format_card,
     card_mask,
@@ -15,7 +14,6 @@ from app.utils import (
     normalize_card,
     normalize_phone,
     normalize_expiry,
-    validate_luhn,
 )
 
 
@@ -136,7 +134,6 @@ class CardAdmin(admin.ModelAdmin):
                     messages.error(request, "Excel fayli bo'sh!")
                     return redirect("..")
 
-                # Map headers
                 header_row = [str(cell).strip().lower() if cell is not None else "" for cell in rows[0]]
                 
                 def find_col(possible_names):
@@ -162,7 +159,7 @@ class CardAdmin(admin.ModelAdmin):
 
                 for row_num, row in enumerate(rows[1:], start=2):
                     if not any(row):
-                        continue  # Skip empty rows
+                        continue
 
                     raw_card = row[card_idx] if card_idx is not None and card_idx < len(row) else None
                     raw_expire = row[expire_idx] if expire_idx is not None and expire_idx < len(row) else None
@@ -170,27 +167,22 @@ class CardAdmin(admin.ModelAdmin):
                     raw_status = row[status_idx] if status_idx is not None and status_idx < len(row) else "active"
                     raw_balance = row[balance_idx] if balance_idx is not None and balance_idx < len(row) else 0
 
-                    # 1. Clean & normalize card number
                     card_num = normalize_card(raw_card)
                     if len(card_num) != 16:
                         error_count += 1
                         error_details.append(f"Qator {row_num}: Karta raqami noto'g'ri ('{raw_card}')")
                         continue
 
-                    # 2. Clean & normalize expiry
                     expire_norm = normalize_expiry(raw_expire)
                     if not expire_norm:
                         expire_norm = "12/26"
 
-                    # 3. Clean & normalize phone
                     phone_norm = normalize_phone(raw_phone)
 
-                    # 4. Status validation
                     status_clean = str(raw_status).strip().lower() if raw_status else "active"
                     if status_clean not in ["active", "inactive", "expired"]:
                         status_clean = "active"
 
-                    # 5. Balance parsing
                     try:
                         if isinstance(raw_balance, (int, float, Decimal)):
                             balance_val = Decimal(str(raw_balance))
@@ -207,7 +199,6 @@ class CardAdmin(admin.ModelAdmin):
                         error_details.append(f"Qator {row_num}: Balans son emas ('{raw_balance}')")
                         continue
 
-                    # Save / update Card
                     Card.objects.update_or_create(
                         card_number=card_num,
                         defaults={
@@ -240,3 +231,51 @@ class CardAdmin(admin.ModelAdmin):
             "opts": self.model._meta,
         }
         return render(request, "admin/app/card/import_excel.html", context)
+
+
+@admin.register(Transfer)
+class TransferAdmin(admin.ModelAdmin):
+    list_display = [
+        "ext_id",
+        "sender_card_masked",
+        "receiver_card_masked",
+        "sending_amount",
+        "currency",
+        "receiving_amount",
+        "state_badge",
+        "try_count",
+        "otp",
+        "created_at",
+    ]
+    list_filter = ["state", "currency", "created_at"]
+    search_fields = ["ext_id", "sender_card_number", "receiver_card_number"]
+    readonly_fields = ["created_at", "confirmed_at", "cancelled_at", "updated_at"]
+
+    def sender_card_masked(self, obj):
+        return card_mask(obj.sender_card_number)
+    sender_card_masked.short_description = "Sender Card"
+
+    def receiver_card_masked(self, obj):
+        return card_mask(obj.receiver_card_number)
+    receiver_card_masked.short_description = "Receiver Card"
+
+    def state_badge(self, obj):
+        colors = {
+            "created": "#ffc107",
+            "confirmed": "#28a745",
+            "cancelled": "#dc3545",
+        }
+        color = colors.get(obj.state, "#6c757d")
+        return format_html(
+            '<span style="color: white; background: {}; padding: 3px 8px; border-radius: 4px; font-weight: bold;">{}</span>',
+            color,
+            obj.get_state_display(),
+        )
+    state_badge.short_description = "State"
+
+
+@admin.register(Error)
+class ErrorAdmin(admin.ModelAdmin):
+    list_display = ["code", "en", "ru", "uz"]
+    search_fields = ["code", "en", "ru", "uz"]
+    ordering = ["code"]
