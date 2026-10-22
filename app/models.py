@@ -1,5 +1,6 @@
 from decimal import Decimal
 from django.db import models
+from django.core.cache import cache
 from app.utils import format_card, card_mask, format_phone, phone_mask
 
 
@@ -133,13 +134,23 @@ class Error(models.Model):
 
     @classmethod
     def get_message(cls, code: int, lang: str = "en") -> str:
-        """Helper to get localized message by code"""
+        """Helper to get localized message by code with caching (300 seconds)"""
+        lang_lower = lang.lower()
+        cache_key = f"error_msg:{code}:{lang_lower}"
+        cached_msg = cache.get(cache_key)
+        if cached_msg is not None:
+            return cached_msg
+
         err = cls.objects.filter(code=code).first()
         if not err:
             return "Unknown error"
-        lang_lower = lang.lower()
+
         if lang_lower == "uz":
-            return err.uz
+            msg = err.uz
         elif lang_lower == "ru":
-            return err.ru
-        return err.en
+            msg = err.ru
+        else:
+            msg = err.en
+
+        cache.set(cache_key, msg, timeout=300)
+        return msg

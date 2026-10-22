@@ -6,7 +6,9 @@ import openpyxl
 from django.test import TestCase, Client
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from django.core.cache import cache
 from app.models import Card, CardStatus, Transfer, TransferState, Error
+from app.tasks import send_periodic_telegram_report
 from app.utils import (
     normalize_card,
     format_card,
@@ -247,3 +249,83 @@ class TransferRPCTestCase(TestCase):
         self.assertIn("result", info_res)
         self.assertEqual(info_res["result"]["card_status"], "active")
         self.assertEqual(info_res["result"]["balance"], 2000000.0)
+
+
+class DataManagementTestCase(TestCase):
+    def setUp(self):
+        cache.clear()
+        call_command("PopulateCommand")
+        self.card = Card.objects.create(
+            card_number="8600777788889999",
+            expire="10/28",
+            phone="+998907778899",
+            status=CardStatus.ACTIVE,
+            balance=Decimal("300000.00"),
+        )
+        self.transfer = Transfer.objects.create(
+            ext_id="tr-dm-001",
+            sender_card_number="8600777788889999",
+            receiver_card_number="8600111122223333",
+            sender_card_expiry="10/28",
+            sending_amount=Decimal("50000.00"),
+            currency="860",
+            receiving_amount=Decimal("50000.00"),
+            state=TransferState.CONFIRMED,
+        )
+
+    def test_periodic_report_task(self):
+        res = send_periodic_telegram_report()
+        self.assertTrue(res["success"])
+        self.assertGreaterEqual(res["cards"], 1)
+        self.assertGreaterEqual(res["transfers"], 1)
+
+    def test_send_report_command(self):
+        out = io.StringIO()
+        call_command("send_report", stdout=out)
+        self.assertIn("Report sent successfully", out.getvalue())
+
+    def test_error_message_caching(self):
+        msg1 = Error.get_message(32701, "uz")
+        self.assertEqual(msg1, "Ext id allaqachon mavjud")
+        # Second call should fetch from cache
+        msg2 = Error.get_message(32701, "uz")
+        self.assertEqual(msg2, msg1)
+
+    def test_card_info_caching(self):
+        client = Client()
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "card.info",
+            "params": {"card_number": "8600777788889999", "expiry": "10/28"},
+            "id": 1,
+        }
+        res1 = client.post("/rpc/", data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(res1.status_code, 200)
+
+        # Check that cache key was created
+        cache_key = "card_info:8600777788889999:10/28"
+        cached_val = cache.get(cache_key)
+        self.assertIsNotNone(cached_val)
+        self.assertEqual(cached_val["card_status"], "active")
+
+    def test_export_transfers_excel_command(self):
+        out_file = "test_transfers.xlsx"
+        call_command("export_transfers_excel", output=out_file)
+        self.assertTrue(os.path.exists(out_file))
+        wb = openpyxl.load_workbook(out_file)
+        ws = wb.active
+        self.assertEqual(ws.title, "Transfers")
+        self.assertGreaterEqual(ws.max_row, 2)
+        if os.path.exists(out_file):
+            os.remove(out_file)
+
+    def test_export_cards_excel_command(self):
+        out_file = "test_cards.xlsx"
+        call_command("export_cards_excel", output=out_file)
+        self.assertTrue(os.path.exists(out_file))
+        wb = openpyxl.load_workbook(out_file)
+        ws = wb.active
+        self.assertEqual(ws.title, "Cards")
+        self.assertGreaterEqual(ws.max_row, 2)
+        if os.path.exists(out_file):
+            os.remove(out_file)

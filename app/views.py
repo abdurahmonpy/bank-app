@@ -4,6 +4,7 @@ from django.http import HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from jsonrpcserver import dispatch
 
+from app.decorators import current_http_request
 # Import rpc module to register all @method handlers
 import app.rpc  # noqa: F401
 
@@ -28,6 +29,8 @@ def jsonrpc_view(request):
             content_type="application/json",
         )
 
+    # Set context for logging decorator
+    token = current_http_request.set(request)
     try:
         request_body = request.body.decode("utf-8")
         response_str = dispatch(request_body)
@@ -43,3 +46,5 @@ def jsonrpc_view(request):
             status=500,
             content_type="application/json",
         )
+    finally:
+        current_http_request.reset(token)
