@@ -1,0 +1,43 @@
+{
+  "id": "bank-app-env-001",
+  "name": "Bank App Local Environment",
+  "values": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000",
+      "type": "default",
+      "enabled": true
+    },
+    {
+      "key": "sender_card",
+      "value": "8600123412341234",
+      "type": "default",
+      "enabled": true
+    },
+    {
+      "key": "sender_expiry",
+      "value": "12/26",
+      "type": "default",
+      "enabled": true
+    },
+    {
+      "key": "receiver_card",
+      "value": "8600567812345678",
+      "type": "default",
+      "enabled": true
+    },
+    {
+      "key": "current_ext_id",
+      "value": "",
+      "type": "default",
+      "enabled": true
+    },
+    {
+      "key": "test_otp",
+      "value": "123456",
+      "type": "default",
+      "enabled": true
+    }
+  ],
+  "_postman_variable_scope": "environment"
+}
