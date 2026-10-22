@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: bank-app-api
+    env: python
+    buildCommand: "pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate && python manage.py PopulateCommand"
+    startCommand: "gunicorn core.wsgi:application --bind 0.0.0.0:$PORT --workers 3"
+    envVars:
+      - key: DEBUG
+        value: "False"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALLOWED_HOSTS
+        value: "*"
+      - key: PYTHON_VERSION
+        value: "3.12.0"
