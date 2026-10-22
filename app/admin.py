@@ -5,7 +5,7 @@ from django.utils.html import format_html
 from decimal import Decimal
 import openpyxl
 
-from app.models import Card, CardStatus, Transfer, Error
+from app.models import Card, CardStatus, Transfer, Error, Payment
 from app.utils import (
     format_card,
     card_mask,
@@ -279,3 +279,34 @@ class ErrorAdmin(admin.ModelAdmin):
     list_display = ["code", "en", "ru", "uz"]
     search_fields = ["code", "en", "ru", "uz"]
     ordering = ["code"]
+
+
+@admin.register(Payment)
+class PaymentAdmin(admin.ModelAdmin):
+    list_display = [
+        "ext_id",
+        "provider",
+        "service_name",
+        "amount",
+        "status_badge",
+        "user_phone",
+        "created_at",
+    ]
+    list_filter = ["status", "provider", "created_at"]
+    search_fields = ["ext_id", "service_name", "user_phone", "provider_transaction_id"]
+    readonly_fields = ["created_at", "updated_at", "raw_response"]
+
+    def status_badge(self, obj):
+        colors = {
+            "pending": "#ffc107",
+            "success": "#28a745",
+            "failed": "#dc3545",
+            "cancelled": "#6c757d",
+        }
+        color = colors.get(obj.status, "#6c757d")
+        return format_html(
+            '<span style="color: white; background: {}; padding: 3px 8px; border-radius: 4px; font-weight: bold;">{}</span>',
+            color,
+            obj.get_status_display(),
+        )
+    status_badge.short_description = "Status"

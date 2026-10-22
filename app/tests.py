@@ -7,7 +7,7 @@ from django.test import TestCase, Client
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.cache import cache
-from app.models import Card, CardStatus, Transfer, TransferState, Error
+from app.models import Card, CardStatus, Transfer, TransferState, Error, Payment, PaymentStatus, PaymentProvider
 from app.tasks import send_periodic_telegram_report
 from app.utils import (
     normalize_card,
@@ -191,7 +191,6 @@ class TransferRPCTestCase(TestCase):
 
     def test_transfer_lifecycle(self):
         ext_id = "tr-test-001"
-        # 1. Create transfer
         create_res = self._rpc(
             "transfer.create",
             {
@@ -210,27 +209,22 @@ class TransferRPCTestCase(TestCase):
         transfer = Transfer.objects.get(ext_id=ext_id)
         otp = transfer.otp
 
-        # 2. Check state
         state_res = self._rpc("transfer.state", {"ext_id": ext_id})
         self.assertEqual(state_res["result"]["state"], "created")
 
-        # 3. Wrong OTP attempt
         wrong_res = self._rpc("transfer.confirm", {"ext_id": ext_id, "otp": "000000"})
         self.assertIn("error", wrong_res)
         self.assertEqual(wrong_res["error"]["code"], 32712)
 
-        # 4. Correct OTP confirm
         confirm_res = self._rpc("transfer.confirm", {"ext_id": ext_id, "otp": otp})
         self.assertIn("result", confirm_res)
         self.assertEqual(confirm_res["result"]["state"], "confirmed")
 
-        # Verify balances updated atomically
         self.sender.refresh_from_db()
         self.receiver.refresh_from_db()
         self.assertEqual(self.sender.balance, Decimal("1900000.00"))
         self.assertEqual(self.receiver.balance, Decimal("150000.00"))
 
-        # 5. History check
         hist_res = self._rpc("transfer.history", {"card_number": "8600123412341234"})
         self.assertIn("result", hist_res)
         self.assertEqual(len(hist_res["result"]), 1)
@@ -360,7 +354,6 @@ class SecurityTestCase(TestCase):
         ip = "192.168.1.100"
         for _ in range(5):
             self.assertTrue(check_rate_limit(f"{ip}:test", limit=5, period=60))
-        # 6th request should fail
         self.assertFalse(check_rate_limit(f"{ip}:test", limit=5, period=60))
 
     def test_serializer_validation(self):
@@ -376,7 +369,7 @@ class SecurityTestCase(TestCase):
         self.assertTrue(s1.is_valid())
 
         invalid_data = valid_data.copy()
-        invalid_data["sending_amount"] = "5.00"  # less than min 100
+        invalid_data["sending_amount"] = "5.00"
         s2 = TransferCreateSerializer(data=invalid_data)
         self.assertFalse(s2.is_valid())
 
@@ -386,13 +379,53 @@ class SecurityTestCase(TestCase):
         payload = json.dumps({"jsonrpc": "2.0", "method": "card.info", "params": {"card_number": "8600123456789012", "expiry": "12/26"}, "id": 1})
         valid_sig = generate_hash(payload, "test_secret")
 
-        # 1. Valid signature
         res_ok = client.post("/rpc/", data=payload, content_type="application/json", HTTP_REQUEST_SIGN=valid_sig)
         self.assertEqual(res_ok.status_code, 200)
 
-        # 2. Tampered / invalid signature -> 403 Forbidden
         res_fail = client.post("/rpc/", data=payload, content_type="application/json", HTTP_REQUEST_SIGN="invalid_sign")
         self.assertEqual(res_fail.status_code, 403)
         self.assertIn("Invalid request signature", res_fail.json()["error"]["message"])
 
         del os.environ["API_SECRET_KEY"]
+
+
+class PaymentIntegrationTestCase(TestCase):
+    def setUp(self):
+        self.client = Client()
+
+    def test_payment_initiate(self):
+        payload = {
+            "amount": "250000.00",
+            "service_name": "Pro Plan Annual",
+            "provider": "stripe",
+            "user_phone": "99 973 03 03",
+        }
+        res = self.client.post("/payment/initiate/", data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(res.status_code, 201)
+        data = res.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["status"], "pending")
+        self.assertEqual(data["amount"], 250000.0)
+        self.assertIn("checkout_url", data)
+
+        ext_id = data["ext_id"]
+
+        # Check status endpoint
+        status_res = self.client.get(f"/payment/status/?ext_id={ext_id}")
+        self.assertEqual(status_res.status_code, 200)
+        self.assertEqual(status_res.json()["status"], "pending")
+
+        # Simulate webhook callback
+        webhook_payload = {
+            "ext_id": ext_id,
+            "event": "payment.succeeded",
+            "provider_transaction_id": "ch_stripe_test_123",
+        }
+        wh_res = self.client.post("/payment/webhook/", data=json.dumps(webhook_payload), content_type="application/json")
+        self.assertEqual(wh_res.status_code, 200)
+        self.assertEqual(wh_res.json()["status"], "success")
+
+        # Check status after webhook
+        payment = Payment.objects.get(ext_id=ext_id)
+        self.assertEqual(payment.status, PaymentStatus.SUCCESS)
+        self.assertEqual(payment.provider_transaction_id, "ch_stripe_test_123")
