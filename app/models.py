@@ -154,3 +154,54 @@ class Error(models.Model):
 
         cache.set(cache_key, msg, timeout=300)
         return msg
+
+
+class PaymentStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    SUCCESS = "success", "Success"
+    FAILED = "failed", "Failed"
+    CANCELLED = "cancelled", "Cancelled"
+
+
+class PaymentProvider(models.TextChoices):
+    PAYME = "payme", "Payme"
+    CLICK = "click", "Click"
+    STRIPE = "stripe", "Stripe"
+    UPAY = "upay", "Upay"
+    PAYNET = "paynet", "Paynet"
+
+
+class Payment(models.Model):
+    ext_id = models.CharField(
+        max_length=100,
+        unique=True,
+        db_index=True,
+        help_text="Unique payment reference identifier",
+    )
+    provider = models.CharField(
+        max_length=20,
+        choices=PaymentProvider.choices,
+        default=PaymentProvider.STRIPE,
+    )
+    service_name = models.CharField(max_length=100, help_text="Service or product description")
+    amount = models.DecimalField(max_digits=15, decimal_places=2, help_text="Amount in UZS or foreign currency")
+    user_phone = models.CharField(max_length=25, blank=True, null=True)
+    status = models.CharField(
+        max_length=20,
+        choices=PaymentStatus.choices,
+        default=PaymentStatus.PENDING,
+        db_index=True,
+    )
+    provider_transaction_id = models.CharField(max_length=100, blank=True, null=True)
+    raw_response = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "payments"
+        ordering = ["-created_at"]
+        verbose_name = "Payment"
+        verbose_name_plural = "Payments"
+
+    def __str__(self):
+        return f"Payment {self.ext_id} ({self.provider}) - {self.amount} UZS [{self.status}]"
