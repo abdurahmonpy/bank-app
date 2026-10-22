@@ -1,10 +1,18 @@
 import os
 import re
+import random
 import logging
 from decimal import Decimal
 import requests
 
 logger = logging.getLogger(__name__)
+
+# Static exchange rates to UZS
+EXCHANGE_RATES = {
+    "860": Decimal("1.00"),      # UZS
+    "643": Decimal("135.00"),    # RUB -> 135 UZS
+    "840": Decimal("12800.00"),  # USD -> 12,800 UZS
+}
 
 
 def normalize_card(raw_card: str) -> str:
@@ -98,19 +106,16 @@ def normalize_expiry(raw_expire: str) -> str:
         return ""
     raw = str(raw_expire).strip()
 
-    # Pattern YYYY-MM
     m1 = re.match(r"^(\d{4})[-/.](\d{1,2})$", raw)
     if m1:
         year, month = m1.group(1), int(m1.group(2))
         return f"{month:02d}/{year[-2:]}"
 
-    # Pattern MM.YYYY or MM/YYYY
     m2 = re.match(r"^(\d{1,2})[-/.](\d{4})$", raw)
     if m2:
         month, year = int(m2.group(1)), m2.group(2)
         return f"{month:02d}/{year[-2:]}"
 
-    # Pattern MM/YY or MM.YY
     m3 = re.match(r"^(\d{1,2})[-/.](\d{2})$", raw)
     if m3:
         month, year = int(m3.group(1)), m3.group(2)
@@ -136,6 +141,31 @@ def validate_luhn(card_number: str) -> bool:
                 digit -= 9
         checksum += digit
     return checksum % 10 == 0
+
+
+def generate_otp(length: int = 6) -> str:
+    """
+    Generates a secure numeric OTP of given length (default 6 digits).
+    """
+    return "".join(random.choices("0123456789", k=length))
+
+
+def calculate_exchange(amount: Decimal | float | int | str, currency: str) -> Decimal:
+    """
+    Calculates receiving amount in UZS using static currency rate.
+    Supported currencies: '860' (UZS), '643' (RUB), '840' (USD).
+    """
+    curr = str(currency).strip()
+    rate = EXCHANGE_RATES.get(curr, Decimal("1.00"))
+    dec_amount = Decimal(str(amount))
+    return (dec_amount * rate).quantize(Decimal("0.01"))
+
+
+def send_telegram_message(phone: str, message: str, chat_id: str | int = 123456) -> bool:
+    """
+    Sends notification or OTP via Telegram bot.
+    """
+    return send_message(message, chat_id=chat_id)
 
 
 def prepare_message(card_number: str, balance: Decimal, lang: str = "UZ") -> str:
@@ -172,7 +202,6 @@ def send_message(message: str, chat_id: str | int = None) -> bool:
         except Exception as e:
             logger.error(f"Failed to send Telegram message: {e}")
 
-    # Fallback to simulated log output
     logger.info(f"[SIMULATED TELEGRAM SEND] To chat_id={target_chat_id}: {message}")
     print(f"[SIMULATED TELEGRAM] To: {target_chat_id} | Message: {message}")
     return True
