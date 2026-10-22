@@ -1,0 +1,170 @@
+{
+  "info": {
+    "_postman_id": "bank-app-collection-001",
+    "name": "Bank App JSON-RPC 2.0 API",
+    "description": "Postman Collection for Bank App JSON-RPC 2.0 endpoints with automated test flow.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8000" },
+    { "key": "sender_card", "value": "8600123412341234" },
+    { "key": "sender_expiry", "value": "12/26" },
+    { "key": "receiver_card", "value": "8600567812345678" }
+  ],
+  "item": [
+    {
+      "name": "1. Card Info (Cached)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"card.info\",\n  \"params\": {\n    \"card_number\": \"{{sender_card}}\",\n    \"expiry\": \"{{sender_expiry}}\"\n  },\n  \"id\": 1\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/rpc/",
+          "host": ["{{baseUrl}}"],
+          "path": ["rpc", ""]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+              "pm.test('Has card_status active', function () {",
+              "    var jsonData = pm.response.json();",
+              "    pm.expect(jsonData.result.card_status).to.eql('active');",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Transfer Create",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"transfer.create\",\n  \"params\": {\n    \"ext_id\": \"tr-{{$guid}}\",\n    \"sender_card_number\": \"{{sender_card}}\",\n    \"sender_card_expiry\": \"{{sender_expiry}}\",\n    \"receiver_card_number\": \"{{receiver_card}}\",\n    \"sending_amount\": 50000,\n    \"currency\": \"860\"\n  },\n  \"id\": 2\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/rpc/",
+          "host": ["{{baseUrl}}"],
+          "path": ["rpc", ""]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Transfer Created successfully', function () {",
+              "    pm.response.to.have.status(200);",
+              "    var jsonData = pm.response.json();",
+              "    pm.expect(jsonData.result.state).to.eql('created');",
+              "    pm.expect(jsonData.result.otp_sent).to.be.true;",
+              "    pm.environment.set('current_ext_id', jsonData.result.ext_id);",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Transfer State Check",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"transfer.state\",\n  \"params\": {\n    \"ext_id\": \"{{current_ext_id}}\"\n  },\n  \"id\": 3\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/rpc/",
+          "host": ["{{baseUrl}}"],
+          "path": ["rpc", ""]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('State is created', function () {",
+              "    var jsonData = pm.response.json();",
+              "    pm.expect(jsonData.result.state).to.be.oneOf(['created', 'confirmed']);",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Transfer Confirm",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"transfer.confirm\",\n  \"params\": {\n    \"ext_id\": \"{{current_ext_id}}\",\n    \"otp\": \"{{test_otp}}\"\n  },\n  \"id\": 4\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/rpc/",
+          "host": ["{{baseUrl}}"],
+          "path": ["rpc", ""]
+        }
+      }
+    },
+    {
+      "name": "5. Transfer Cancel",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"transfer.cancel\",\n  \"params\": {\n    \"ext_id\": \"{{current_ext_id}}\"\n  },\n  \"id\": 5\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/rpc/",
+          "host": ["{{baseUrl}}"],
+          "path": ["rpc", ""]
+        }
+      }
+    },
+    {
+      "name": "6. Transfer History",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"transfer.history\",\n  \"params\": {\n    \"card_number\": \"{{sender_card}}\",\n    \"status\": \"confirmed\"\n  },\n  \"id\": 6\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/rpc/",
+          "host": ["{{baseUrl}}"],
+          "path": ["rpc", ""]
+        }
+      }
+    }
+  ]
+}
