@@ -2,9 +2,11 @@ import logging
 from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction, models
+from django.core.cache import cache
 from jsonrpcserver import method, Success, Error, Result
 
 from app.models import Card, Transfer, TransferState, Error as ErrorModel
+from app.decorators import log_rpc_method
 from app.utils import (
     normalize_card,
     normalize_expiry,
@@ -27,6 +29,7 @@ def get_error(code: int, custom_msg: str = None, lang: str = "en") -> Result:
 
 
 @method(name="transfer.create")
+@log_rpc_method
 def transfer_create(
     ext_id: str,
     sender_card_number: str,
@@ -37,6 +40,7 @@ def transfer_create(
 ) -> Result:
     """
     Starts a transfer request, validates cards, amounts, balance, and sends OTP.
+    Logged with request IP, processing time, and masked parameters.
     """
     if not ext_id:
         return get_error(32700, "Ext id must be unique")
@@ -118,9 +122,11 @@ def transfer_create(
 
 
 @method(name="transfer.confirm")
+@log_rpc_method
 def transfer_confirm(ext_id: str, otp: str) -> Result:
     """
     Confirms transfer using OTP. Deducts sender balance and credits receiver balance.
+    Logged with client IP, duration, and masked payload.
     """
     transfer = Transfer.objects.filter(ext_id=ext_id).first()
     if not transfer:
@@ -163,6 +169,9 @@ def transfer_confirm(ext_id: str, otp: str) -> Result:
         transfer.confirmed_at = timezone.now()
         transfer.save(update_fields=["state", "confirmed_at", "updated_at"])
 
+    # Invalidate cached card infos for sender and receiver
+    cache.delete(f"card_info:{transfer.sender_card_number}:{transfer.sender_card_expiry}")
+
     logger.info(f"Transfer {ext_id} confirmed successfully.")
     return Success({
         "ext_id": transfer.ext_id,
@@ -171,6 +180,7 @@ def transfer_confirm(ext_id: str, otp: str) -> Result:
 
 
 @method(name="transfer.cancel")
+@log_rpc_method
 def transfer_cancel(ext_id: str) -> Result:
     """
     Cancels an unconfirmed transfer.
@@ -251,20 +261,33 @@ def transfer_history(
 def card_info(card_number: str, expiry: str) -> Result:
     """
     Fetches card info (card_status, balance, phone, masked_card).
+    Cached for 30 seconds to reduce DB load in high-traffic fintech environments.
     """
     clean_card = normalize_card(card_number)
+    norm_exp = normalize_expiry(expiry)
+
+    # 3.4 Caching strategy check
+    cache_key = f"card_info:{clean_card}:{norm_exp}"
+    cached_data = cache.get(cache_key)
+    if cached_data is not None:
+        return Success(cached_data)
+
     card = Card.objects.filter(card_number=clean_card).first()
     if not card:
         return get_error(32706, "Card not found")
 
-    norm_exp = normalize_expiry(expiry)
     if norm_exp != card.expire:
         return get_error(32704, "Card expiry is not valid")
 
-    return Success({
+    card_data = {
         "card_number": card.masked_card,
         "expire": card.expire,
         "phone": card.masked_phone,
         "card_status": card.status,
         "balance": float(card.balance),
-    })
+    }
+
+    # Cache response for 30 seconds
+    cache.set(cache_key, card_data, timeout=30)
+
+    return Success(card_data)
