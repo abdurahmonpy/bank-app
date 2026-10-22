@@ -203,5 +203,9 @@ def send_message(message: str, chat_id: str | int = None) -> bool:
             logger.error(f"Failed to send Telegram message: {e}")
 
     logger.info(f"[SIMULATED TELEGRAM SEND] To chat_id={target_chat_id}: {message}")
-    print(f"[SIMULATED TELEGRAM] To: {target_chat_id} | Message: {message}")
+    try:
+        print(f"[SIMULATED TELEGRAM] To: {target_chat_id} | Message: {message}")
+    except Exception:
+        safe_msg = message.encode("ascii", "replace").decode("ascii")
+        print(f"[SIMULATED TELEGRAM] To: {target_chat_id} | Message: {safe_msg}")
     return True
