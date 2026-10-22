@@ -44,6 +44,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "app.middleware.RequestSignatureMiddleware",
 ]
 
 ROOT_URLCONF = "core.urls"
@@ -100,8 +101,13 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# CORS
-CORS_ALLOW_ALL_ORIGINS = True
+# 5.1 CORS Configuration
+CORS_ALLOWED_ORIGINS = [
+    "https://yourfrontend.com",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+CORS_ALLOW_CREDENTIALS = True
 
 # Caching Strategy (Redis or fallback to in-memory)
 REDIS_URL = os.getenv("REDIS_URL")
