@@ -21,7 +21,13 @@ from app.utils import (
     prepare_message,
     send_message,
     calculate_exchange,
+    encrypt_card,
+    decrypt_card,
+    generate_hash,
+    verify_hash,
+    check_rate_limit,
 )
+from app.serializers import TransferCreateSerializer
 
 
 class UtilsTestCase(TestCase):
@@ -148,6 +154,7 @@ class AdminExcelImportTestCase(TestCase):
 class TransferRPCTestCase(TestCase):
     def setUp(self):
         self.client = Client()
+        cache.clear()
         call_command("PopulateCommand")
 
         self.sender = Card.objects.create(
@@ -165,17 +172,19 @@ class TransferRPCTestCase(TestCase):
             balance=Decimal("50000.00"),
         )
 
-    def _rpc(self, method: str, params: dict, rpc_id: int = 1):
+    def _rpc(self, method: str, params: dict, rpc_id: int = 1, headers: dict = None):
         payload = {
             "jsonrpc": "2.0",
             "method": method,
             "params": params,
             "id": rpc_id,
         }
+        hdrs = headers or {}
         res = self.client.post(
             "/rpc/",
             data=json.dumps(payload),
             content_type="application/json",
+            **hdrs,
         )
         self.assertEqual(res.status_code, 200)
         return res.json()
@@ -287,7 +296,6 @@ class DataManagementTestCase(TestCase):
     def test_error_message_caching(self):
         msg1 = Error.get_message(32701, "uz")
         self.assertEqual(msg1, "Ext id allaqachon mavjud")
-        # Second call should fetch from cache
         msg2 = Error.get_message(32701, "uz")
         self.assertEqual(msg2, msg1)
 
@@ -302,7 +310,6 @@ class DataManagementTestCase(TestCase):
         res1 = client.post("/rpc/", data=json.dumps(payload), content_type="application/json")
         self.assertEqual(res1.status_code, 200)
 
-        # Check that cache key was created
         cache_key = "card_info:8600777788889999:10/28"
         cached_val = cache.get(cache_key)
         self.assertIsNotNone(cached_val)
@@ -329,3 +336,63 @@ class DataManagementTestCase(TestCase):
         self.assertGreaterEqual(ws.max_row, 2)
         if os.path.exists(out_file):
             os.remove(out_file)
+
+
+class SecurityTestCase(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    def test_fernet_encryption(self):
+        card = "8600123456789012"
+        encrypted = encrypt_card(card)
+        self.assertNotEqual(card, encrypted)
+        decrypted = decrypt_card(encrypted)
+        self.assertEqual(card, decrypted)
+
+    def test_hmac_hash_verification(self):
+        secret = "super_secure_secret_123"
+        payload = '{"jsonrpc": "2.0", "method": "card.info", "params": {}}'
+        signature = generate_hash(payload, secret)
+        self.assertTrue(verify_hash(payload, secret, signature))
+        self.assertFalse(verify_hash(payload + "tampered", secret, signature))
+
+    def test_rate_limiting_helper(self):
+        ip = "192.168.1.100"
+        for _ in range(5):
+            self.assertTrue(check_rate_limit(f"{ip}:test", limit=5, period=60))
+        # 6th request should fail
+        self.assertFalse(check_rate_limit(f"{ip}:test", limit=5, period=60))
+
+    def test_serializer_validation(self):
+        valid_data = {
+            "ext_id": "tr-valid-001",
+            "sender_card_number": "8600 1234 5678 9012",
+            "sender_card_expiry": "12/26",
+            "receiver_card_number": "8600 5678 1234 5678",
+            "sending_amount": "50000.00",
+            "currency": "860",
+        }
+        s1 = TransferCreateSerializer(data=valid_data)
+        self.assertTrue(s1.is_valid())
+
+        invalid_data = valid_data.copy()
+        invalid_data["sending_amount"] = "5.00"  # less than min 100
+        s2 = TransferCreateSerializer(data=invalid_data)
+        self.assertFalse(s2.is_valid())
+
+    def test_signature_middleware(self):
+        client = Client()
+        os.environ["API_SECRET_KEY"] = "test_secret"
+        payload = json.dumps({"jsonrpc": "2.0", "method": "card.info", "params": {"card_number": "8600123456789012", "expiry": "12/26"}, "id": 1})
+        valid_sig = generate_hash(payload, "test_secret")
+
+        # 1. Valid signature
+        res_ok = client.post("/rpc/", data=payload, content_type="application/json", HTTP_REQUEST_SIGN=valid_sig)
+        self.assertEqual(res_ok.status_code, 200)
+
+        # 2. Tampered / invalid signature -> 403 Forbidden
+        res_fail = client.post("/rpc/", data=payload, content_type="application/json", HTTP_REQUEST_SIGN="invalid_sign")
+        self.assertEqual(res_fail.status_code, 403)
+        self.assertIn("Invalid request signature", res_fail.json()["error"]["message"])
+
+        del os.environ["API_SECRET_KEY"]

@@ -1,9 +1,13 @@
 import os
 import re
+import hmac
+import hashlib
 import random
 import logging
 from decimal import Decimal
 import requests
+from django.core.cache import cache
+from cryptography.fernet import Fernet
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +17,64 @@ EXCHANGE_RATES = {
     "643": Decimal("135.00"),    # RUB -> 135 UZS
     "840": Decimal("12800.00"),  # USD -> 12,800 UZS
 }
+
+# Encryption cipher setup
+_FERNET_KEY = os.getenv("ENCRYPTION_KEY")
+if not _FERNET_KEY or len(_FERNET_KEY) < 32:
+    # Use deterministic fallback key if not set in environment
+    _FERNET_KEY = "k1X9_J5k8Z1v3Q4_W7e2R9y8T4u1I6o3P0a2S5d8F1g="
+
+try:
+    cipher = Fernet(_FERNET_KEY.encode() if isinstance(_FERNET_KEY, str) else _FERNET_KEY)
+except Exception:
+    # Generate valid fallback key
+    _fallback = Fernet.generate_key()
+    cipher = Fernet(_fallback)
+
+
+def encrypt_card(card_number: str) -> str:
+    """Encrypts card number symmetrically using Fernet."""
+    if not card_number:
+        return ""
+    return cipher.encrypt(str(card_number).encode()).decode()
+
+
+def decrypt_card(encrypted_card: str) -> str:
+    """Decrypts card number symmetrically using Fernet."""
+    if not encrypted_card:
+        return ""
+    try:
+        return cipher.decrypt(str(encrypted_card).encode()).decode()
+    except Exception as e:
+        logger.error(f"Failed to decrypt card: {e}")
+        return ""
+
+
+def generate_hash(payload: str, secret: str) -> str:
+    """Generates HMAC-SHA256 signature for request payload."""
+    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def verify_hash(payload: str, secret: str, signature: str) -> bool:
+    """Safely compares HMAC-SHA256 signature."""
+    expected = generate_hash(payload, secret)
+    return hmac.compare_digest(expected, signature)
+
+
+def check_rate_limit(key: str, limit: int = 5, period: int = 60) -> bool:
+    """
+    Rate limiting logic using Django cache.
+    Returns True if request is allowed, False if rate limit exceeded.
+    """
+    cache_key = f"ratelimit:{key}"
+    current_count = cache.get(cache_key)
+    if current_count is None:
+        cache.set(cache_key, 1, timeout=period)
+        return True
+    elif current_count < limit:
+        cache.incr(cache_key)
+        return True
+    return False
 
 
 def normalize_card(raw_card: str) -> str:
@@ -53,7 +115,6 @@ def card_mask(card_number: str) -> str:
 def normalize_phone(raw_phone: str) -> str:
     """
     Normalizes phone numbers to Uzbekistan format +998XXXXXXXXX or returns empty if invalid.
-    Handles: '99 973 03 03', '973-03-03', '+998901234567', '901234567', etc.
     """
     if not raw_phone or str(raw_phone).strip().lower() in ["(empty)", "nan", "none", "-"]:
         return ""
@@ -61,11 +122,9 @@ def normalize_phone(raw_phone: str) -> str:
     if not digits:
         return ""
     
-    # If 9 digits (e.g. 999730303), add Uzbekistan country code 998
     if len(digits) == 9:
         digits = "998" + digits
     elif len(digits) == 7:
-        # 7-digit local number (e.g. 9730303), default operator prefix can be prepended or kept
         digits = "99890" + digits
     elif len(digits) == 12 and digits.startswith("998"):
         pass
@@ -74,10 +133,7 @@ def normalize_phone(raw_phone: str) -> str:
 
 
 def format_phone(raw_phone: str) -> str:
-    """
-    Formats phone into human-readable string:
-    '+998 99 973 03 03'
-    """
+    """Formats phone into human-readable string: '+998 99 973 03 03'"""
     normalized = normalize_phone(raw_phone)
     if normalized.startswith("+998") and len(normalized) == 13:
         return f"+998 {normalized[4:6]} {normalized[6:9]} {normalized[9:11]} {normalized[11:]}"
@@ -85,10 +141,7 @@ def format_phone(raw_phone: str) -> str:
 
 
 def phone_mask(phone: str) -> str:
-    """
-    Masks phone number:
-    '+998 99 973 03 03' -> '+998 99 *** ** 03'
-    """
+    """Masks phone number: '+998 99 973 03 03' -> '+998 99 *** ** 03'"""
     normalized = normalize_phone(phone)
     if normalized.startswith("+998") and len(normalized) == 13:
         return f"+998 {normalized[4:6]} *** ** {normalized[11:]}"
@@ -98,10 +151,7 @@ def phone_mask(phone: str) -> str:
 
 
 def normalize_expiry(raw_expire: str) -> str:
-    """
-    Normalizes expiry date variations into 'MM/YY':
-    e.g. '12/24', '2024-12', '12.2024', '03.2026', '2026-08', '04/25' -> 'MM/YY'
-    """
+    """Normalizes expiry date variations into 'MM/YY'"""
     if not raw_expire:
         return ""
     raw = str(raw_expire).strip()
@@ -125,9 +175,7 @@ def normalize_expiry(raw_expire: str) -> str:
 
 
 def validate_luhn(card_number: str) -> bool:
-    """
-    Validates card number using the standard Luhn algorithm (mod 10).
-    """
+    """Validates card number using the standard Luhn algorithm (mod 10)."""
     digits = [int(c) for c in normalize_card(card_number)]
     if not digits:
         return False
@@ -144,17 +192,12 @@ def validate_luhn(card_number: str) -> bool:
 
 
 def generate_otp(length: int = 6) -> str:
-    """
-    Generates a secure numeric OTP of given length (default 6 digits).
-    """
+    """Generates a secure numeric OTP of given length (default 6 digits)."""
     return "".join(random.choices("0123456789", k=length))
 
 
 def calculate_exchange(amount: Decimal | float | int | str, currency: str) -> Decimal:
-    """
-    Calculates receiving amount in UZS using static currency rate.
-    Supported currencies: '860' (UZS), '643' (RUB), '840' (USD).
-    """
+    """Calculates receiving amount in UZS using static currency rate."""
     curr = str(currency).strip()
     rate = EXCHANGE_RATES.get(curr, Decimal("1.00"))
     dec_amount = Decimal(str(amount))
@@ -162,17 +205,12 @@ def calculate_exchange(amount: Decimal | float | int | str, currency: str) -> De
 
 
 def send_telegram_message(phone: str, message: str, chat_id: str | int = 123456) -> bool:
-    """
-    Sends notification or OTP via Telegram bot.
-    """
+    """Sends notification or OTP via Telegram bot."""
     return send_message(message, chat_id=chat_id)
 
 
 def prepare_message(card_number: str, balance: Decimal, lang: str = "UZ") -> str:
-    """
-    Prepares a notification message using template.
-    Template: 'Sizning kartangiz [card_number] aktiv va foydalanishga [balance] UZS mavjud!'
-    """
+    """Prepares notification message using template."""
     masked = card_mask(card_number)
     formatted_balance = f"{balance:,.2f}"
     if lang.upper() == "UZ":
@@ -183,10 +221,7 @@ def prepare_message(card_number: str, balance: Decimal, lang: str = "UZ") -> str
 
 
 def send_message(message: str, chat_id: str | int = None) -> bool:
-    """
-    Sends message to Telegram bot if credentials are configured,
-    or logs simulation otherwise.
-    """
+    """Sends message to Telegram bot or simulates log."""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     target_chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "123456789")
 

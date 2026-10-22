@@ -6,7 +6,13 @@ from django.core.cache import cache
 from jsonrpcserver import method, Success, Error, Result
 
 from app.models import Card, Transfer, TransferState, Error as ErrorModel
-from app.decorators import log_rpc_method
+from app.decorators import log_rpc_method, current_http_request, get_client_ip
+from app.serializers import (
+    TransferCreateSerializer,
+    TransferConfirmSerializer,
+    TransferCancelSerializer,
+    CardInfoSerializer,
+)
 from app.utils import (
     normalize_card,
     normalize_expiry,
@@ -17,6 +23,7 @@ from app.utils import (
     phone_mask,
     format_card,
     format_phone,
+    check_rate_limit,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,37 +47,38 @@ def transfer_create(
 ) -> Result:
     """
     Starts a transfer request, validates cards, amounts, balance, and sends OTP.
-    Logged with request IP, processing time, and masked parameters.
+    Validated using DRF Serializer and logged with IP and execution duration.
     """
-    if not ext_id:
-        return get_error(32700, "Ext id must be unique")
+    # 5.2 Request Validation using Serializers
+    serializer = TransferCreateSerializer(data={
+        "ext_id": ext_id,
+        "sender_card_number": sender_card_number,
+        "sender_card_expiry": sender_card_expiry,
+        "receiver_card_number": receiver_card_number,
+        "sending_amount": sending_amount,
+        "currency": currency,
+    })
+    if not serializer.is_valid():
+        first_err = list(serializer.errors.values())[0][0]
+        return get_error(32706, f"Validation error: {first_err}")
+
+    validated = serializer.validated_data
+    clean_ext_id = validated["ext_id"]
+    sender_clean = validated["sender_card_number"]
+    receiver_clean = validated["receiver_card_number"]
+    sender_norm_expiry = validated["sender_card_expiry"]
+    amount_dec = validated["sending_amount"]
+    str_curr = validated["currency"]
 
     # 1. Unique ext_id check
-    if Transfer.objects.filter(ext_id=ext_id).exists():
+    if Transfer.objects.filter(ext_id=clean_ext_id).exists():
         return get_error(32701, "Ext id already exists")
 
-    # 2. Currency check (must be 860, 643, or 840)
-    str_curr = str(currency).strip()
-    if str_curr not in ["860", "643", "840"]:
-        return get_error(32707, "Currency not allowed except 860, 643, 840")
-
-    # 3. Amount validation
-    try:
-        amount_dec = Decimal(str(sending_amount))
-        if amount_dec <= Decimal("0"):
-            return get_error(32709, "Amount is small")
-        if amount_dec > Decimal("1000000000.00"):
-            return get_error(32708, "Amount is greater than allowed")
-    except Exception:
-        return get_error(32706, "Invalid amount format")
-
-    # 4. Sender card validation
-    sender_clean = normalize_card(sender_card_number)
+    # 2. Sender card validation
     sender_card = Card.objects.filter(card_number=sender_clean).first()
     if not sender_card:
         return get_error(32706, "Sender card not found")
 
-    sender_norm_expiry = normalize_expiry(sender_card_expiry)
     if sender_norm_expiry != sender_card.expire:
         return get_error(32704, "Card expiry is not valid")
 
@@ -86,20 +94,19 @@ def transfer_create(
     if sender_card.balance < receiving_amount:
         return get_error(32702, "Balance is not enough")
 
-    # 5. Receiver card validation
-    receiver_clean = normalize_card(receiver_card_number)
+    # 3. Receiver card validation
     receiver_card = Card.objects.filter(card_number=receiver_clean).first()
     if not receiver_card:
         return get_error(32706, "Receiver card not found")
 
-    # 6. OTP Generation and Sending
+    # 4. OTP Generation and Sending
     otp = generate_otp(6)
     msg = f"Tasdiqlash kodi: {otp}. O'tkazma summasi: {amount_dec} (Valyuta: {str_curr})."
     send_telegram_message(phone=sender_card.phone, message=msg)
 
-    # 7. Create transfer record
+    # 5. Create transfer record
     transfer = Transfer.objects.create(
-        ext_id=ext_id,
+        ext_id=clean_ext_id,
         sender_card_number=sender_clean,
         receiver_card_number=receiver_clean,
         sender_card_expiry=sender_norm_expiry,
@@ -113,7 +120,7 @@ def transfer_create(
         try_count=0,
     )
 
-    logger.info(f"Transfer {ext_id} created successfully with OTP {otp}")
+    logger.info(f"Transfer {clean_ext_id} created successfully with OTP {otp}")
     return Success({
         "ext_id": transfer.ext_id,
         "state": transfer.state,
@@ -126,8 +133,21 @@ def transfer_create(
 def transfer_confirm(ext_id: str, otp: str) -> Result:
     """
     Confirms transfer using OTP. Deducts sender balance and credits receiver balance.
-    Logged with client IP, duration, and masked payload.
+    Enforces Rate Limiting (max 5 requests/minute per IP) and Serializer validation.
     """
+    req = current_http_request.get()
+    client_ip = get_client_ip(req)
+
+    # 5.7 Rate Limiting check
+    if not check_rate_limit(f"{client_ip}:confirm", limit=5, period=60):
+        return get_error(32711, "Rate limit exceeded (max 5 requests per minute). Try later.")
+
+    # 5.2 Serializer validation
+    serializer = TransferConfirmSerializer(data={"ext_id": ext_id, "otp": otp})
+    if not serializer.is_valid():
+        first_err = list(serializer.errors.values())[0][0]
+        return get_error(32706, f"Validation error: {first_err}")
+
     transfer = Transfer.objects.filter(ext_id=ext_id).first()
     if not transfer:
         return get_error(32706, "Transfer not found")
@@ -169,7 +189,7 @@ def transfer_confirm(ext_id: str, otp: str) -> Result:
         transfer.confirmed_at = timezone.now()
         transfer.save(update_fields=["state", "confirmed_at", "updated_at"])
 
-    # Invalidate cached card infos for sender and receiver
+    # Invalidate cached card infos
     cache.delete(f"card_info:{transfer.sender_card_number}:{transfer.sender_card_expiry}")
 
     logger.info(f"Transfer {ext_id} confirmed successfully.")
@@ -185,6 +205,10 @@ def transfer_cancel(ext_id: str) -> Result:
     """
     Cancels an unconfirmed transfer.
     """
+    serializer = TransferCancelSerializer(data={"ext_id": ext_id})
+    if not serializer.is_valid():
+        return get_error(32706, "Invalid parameters")
+
     transfer = Transfer.objects.filter(ext_id=ext_id).first()
     if not transfer:
         return get_error(32706, "Transfer not found")
@@ -201,7 +225,7 @@ def transfer_cancel(ext_id: str) -> Result:
 @method(name="transfer.state")
 def transfer_state(ext_id: str) -> Result:
     """
-    Returns the current state of a transfer.
+    Returns current state of a transfer.
     """
     transfer = Transfer.objects.filter(ext_id=ext_id).first()
     if not transfer:
@@ -263,10 +287,14 @@ def card_info(card_number: str, expiry: str) -> Result:
     Fetches card info (card_status, balance, phone, masked_card).
     Cached for 30 seconds to reduce DB load in high-traffic fintech environments.
     """
-    clean_card = normalize_card(card_number)
-    norm_exp = normalize_expiry(expiry)
+    serializer = CardInfoSerializer(data={"card_number": card_number, "expiry": expiry})
+    if not serializer.is_valid():
+        first_err = list(serializer.errors.values())[0][0]
+        return get_error(32706, f"Validation error: {first_err}")
 
-    # 3.4 Caching strategy check
+    clean_card = serializer.validated_data["card_number"]
+    norm_exp = serializer.validated_data["expiry"]
+
     cache_key = f"card_info:{clean_card}:{norm_exp}"
     cached_data = cache.get(cache_key)
     if cached_data is not None:
